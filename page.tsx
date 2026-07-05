@@ -1,29 +1,59 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
-import { createDocument, deleteDocument, listDocuments, type DocType, type Document } from "@/lib/api";
+import {
+  chatEdit,
+  exportDocument,
+  getDocument,
+  listVersions,
+  updateDocument,
+  type DocumentDetail,
+  type ExportFormat,
+  type Version,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { CUSTOM_DOC_TYPE_OPTION as CUSTOM_OPTION, DOC_TYPE_LABELS, docTypeIcon, docTypeLabel } from "@/lib/doc-types";
+import { docTypeLabel } from "@/lib/doc-types";
 import { Spinner } from "@/components/spinner";
 import { useToast } from "@/lib/toast-context";
 
-export default function DocumentsPage() {
-  const router = useRouter();
-  const { token, ready, logout } = useAuth();
-  const { showToast } = useToast();
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<number | null>(null);
+function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString("ko-KR", { dateStyle: "medium", timeStyle: "short" });
+}
 
-  const [title, setTitle] = useState("");
-  const [docTypeSelect, setDocTypeSelect] = useState<string>("PRD");
-  const [customDocType, setCustomDocType] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [creating, setCreating] = useState(false);
+export default function DocumentDetailPage() {
+  const params = useParams<{ id: string }>();
+  const documentId = Number(params.id);
+  const router = useRouter();
+  const { token, ready } = useAuth();
+  const { showToast } = useToast();
+
+  const [doc, setDoc] = useState<DocumentDetail | null>(null);
+  const [versions, setVersions] = useState<Version[]>([]);
+  const [content, setContent] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const [instruction, setInstruction] = useState("");
+  const [chatting, setChatting] = useState(false);
+  const [chatLog, setChatLog] = useState<{ role: "user" | "ai"; text: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
+  const [view, setView] = useState<"edit" | "preview">("edit");
+
+  async function refresh(currentToken: string) {
+    const [detail, versionList] = await Promise.all([
+      getDocument(currentToken, documentId),
+      listVersions(currentToken, documentId),
+    ]);
+    setDoc(detail);
+    setContent(detail.latest_content);
+    setVersions(versionList);
+  }
 
   useEffect(() => {
     if (!ready) return;
@@ -31,170 +61,174 @@ export default function DocumentsPage() {
       router.push("/login");
       return;
     }
-    listDocuments(token)
-      .then(setDocuments)
-      .catch((err) => setError(err instanceof Error ? err.message : "목록을 불러오지 못했습니다."))
+    refresh(token)
+      .catch((err) => setError(err instanceof Error ? err.message : "문서를 불러오지 못했습니다."))
       .finally(() => setLoading(false));
-  }, [ready, token, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, token, documentId, router]);
 
-  const stats = useMemo(() => {
-    const byType = new Map<string, number>();
-    for (const doc of documents) {
-      byType.set(doc.doc_type, (byType.get(doc.doc_type) ?? 0) + 1);
-    }
-    const topType = [...byType.entries()].sort((a, b) => b[1] - a[1])[0];
-    return {
-      total: documents.length,
-      typeCount: byType.size,
-      topType: topType ? docTypeLabel(topType[0]) : "-",
-    };
-  }, [documents]);
-
-  async function handleCreate(e: FormEvent) {
-    e.preventDefault();
+  async function handleSave() {
     if (!token) return;
-
-    const docType: DocType =
-      docTypeSelect === CUSTOM_OPTION ? customDocType.trim() : (docTypeSelect as DocType);
-    if (!docType) {
-      setError("만들고 싶은 문서 유형을 입력해 주세요.");
-      return;
-    }
-
-    setCreating(true);
+    setSaving(true);
     setError(null);
     try {
-      const created = await createDocument(token, title, docType, prompt);
-      showToast("AI 초안이 생성되었습니다.");
-      router.push(`/documents/${created.id}`);
+      await updateDocument(token, documentId, content, "수동 편집");
+      await refresh(token);
+      showToast("새 버전으로 저장했습니다.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "문서 생성에 실패했습니다.");
+      setError(err instanceof Error ? err.message : "저장에 실패했습니다.");
     } finally {
-      setCreating(false);
+      setSaving(false);
     }
   }
 
-  async function handleDelete(doc: Document) {
-    if (!token) return;
-    if (!window.confirm(`"${doc.title}" 문서를 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
-
-    setDeletingId(doc.id);
+  async function handleExport(format: ExportFormat) {
+    if (!token || !doc) return;
+    setExportingFormat(format);
+    setError(null);
     try {
-      await deleteDocument(token, doc.id);
-      setDocuments((list) => list.filter((d) => d.id !== doc.id));
-      showToast("문서를 삭제했습니다.");
+      await exportDocument(token, documentId, format, doc.title);
+      showToast(`${format.toUpperCase()} 파일을 내려받았습니다.`);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "삭제에 실패했습니다.", "error");
+      setError(err instanceof Error ? err.message : "내보내기에 실패했습니다.");
     } finally {
-      setDeletingId(null);
+      setExportingFormat(null);
+    }
+  }
+
+  async function handleChat(e: FormEvent) {
+    e.preventDefault();
+    if (!token || !instruction.trim()) return;
+    setChatting(true);
+    setError(null);
+    const userInstruction = instruction;
+    setChatLog((log) => [...log, { role: "user", text: userInstruction }]);
+    setInstruction("");
+    try {
+      const { reply, version } = await chatEdit(token, documentId, userInstruction);
+      setChatLog((log) => [...log, { role: "ai", text: reply }]);
+      setContent(version.content);
+      await refresh(token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "AI 편집 요청에 실패했습니다.");
+    } finally {
+      setChatting(false);
     }
   }
 
   if (!ready || loading) {
     return (
-      <main className="page">
+      <main className="page page-wide">
         <Spinner label="불러오는 중..." />
+      </main>
+    );
+  }
+  if (!doc) {
+    return (
+      <main className="page page-wide">
+        <p className="error-text">{error ?? "문서를 찾을 수 없습니다."}</p>
       </main>
     );
   }
 
   return (
-    <main className="page">
-      <div className="row-between">
+    <main className="page page-wide">
+      <Link href="/documents" className="back-link">
+        ← 내 문서로
+      </Link>
+
+      <div className="doc-header">
         <div>
-          <h1>내 문서</h1>
-          <p className="subtitle" style={{ marginBottom: 0 }}>
-            AI로 초안을 만들고 채팅으로 다듬어 보세요
+          <h1>{doc.title}</h1>
+          <p className="doc-meta">
+            <span className="badge">{docTypeLabel(doc.doc_type)}</span>
+            <span className="muted">마지막 수정 {formatDateTime(doc.updated_at)}</span>
+            <span className="muted">· v{doc.version_count}</span>
           </p>
         </div>
-        <button className="secondary" onClick={logout}>
-          로그아웃
-        </button>
       </div>
-
-      {documents.length > 0 && (
-        <div className="stats-bar">
-          <div className="stat-pill">
-            <div className="stat-value">{stats.total}</div>
-            <div className="stat-label">전체 문서</div>
-          </div>
-          <div className="stat-pill">
-            <div className="stat-value">{stats.typeCount}</div>
-            <div className="stat-label">사용 중인 유형</div>
-          </div>
-          <div className="stat-pill">
-            <div className="stat-value">{stats.topType}</div>
-            <div className="stat-label">가장 많이 쓴 유형</div>
-          </div>
-        </div>
-      )}
 
       {error && <p className="error-text">{error}</p>}
 
-      <section className="card" style={{ marginBottom: 28 }}>
-        <h2>새 문서 생성 (AI 초안)</h2>
-        <form onSubmit={handleCreate} className="form">
-          <input placeholder="문서 제목" value={title} onChange={(e) => setTitle(e.target.value)} required />
-          <select value={docTypeSelect} onChange={(e) => setDocTypeSelect(e.target.value)}>
-            {Object.entries(DOC_TYPE_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-            <option value={CUSTOM_OPTION}>기타 (직접 입력)</option>
-          </select>
-          {docTypeSelect === CUSTOM_OPTION && (
-            <input
-              placeholder="예: 여행 계획서, 제안서, 회의록 등 원하는 문서 유형을 입력하세요"
-              value={customDocType}
-              onChange={(e) => setCustomDocType(e.target.value)}
-              required
-            />
-          )}
-          <textarea
-            placeholder="어떤 문서를 만들고 싶은지 설명해 주세요"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={3}
-            required
-          />
-          <button type="submit" disabled={creating}>
-            {creating ? "생성 중..." : "AI로 초안 생성"}
-          </button>
-        </form>
-      </section>
+      <div className="layout-columns" style={{ marginTop: 20 }}>
+        <section className="col-main card">
+          <div className="row-between" style={{ marginBottom: 12 }}>
+            <div className="tabs">
+              <button
+                className={view === "edit" ? "tab active" : "tab"}
+                onClick={() => setView("edit")}
+                type="button"
+              >
+                편집
+              </button>
+              <button
+                className={view === "preview" ? "tab active" : "tab"}
+                onClick={() => setView("preview")}
+                type="button"
+              >
+                미리보기
+              </button>
+            </div>
+          </div>
 
-      {documents.length === 0 ? (
-        <div className="empty-state">아직 생성한 문서가 없습니다. 위에서 첫 문서를 만들어 보세요.</div>
-      ) : (
-        <ul className="doc-list">
-          {documents.map((doc) => (
-            <li key={doc.id} className="doc-list-item">
-              <div className="doc-card-top">
-                <Link href={`/documents/${doc.id}`} style={{ flex: 1 }}>
-                  <span>
-                    <span className="doc-type-icon">{docTypeIcon(doc.doc_type)}</span>
-                    <strong>{doc.title}</strong>
-                  </span>
-                  <span className="badge">{docTypeLabel(doc.doc_type)}</span>
-                </Link>
-                <div className="doc-card-actions">
-                  <button
-                    className="secondary"
-                    disabled={deletingId === doc.id}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      handleDelete(doc);
-                    }}
-                  >
-                    {deletingId === doc.id ? "삭제 중..." : "삭제"}
-                  </button>
-                </div>
+          {view === "edit" ? (
+            <textarea className="editor-textarea" value={content} onChange={(e) => setContent(e.target.value)} />
+          ) : (
+            <div className="markdown-preview">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            </div>
+          )}
+
+          <div className="top-actions">
+            <button onClick={handleSave} disabled={saving}>
+              {saving ? "저장 중..." : "저장 (새 버전)"}
+            </button>
+            <button className="secondary" onClick={() => handleExport("pdf")} disabled={exportingFormat !== null}>
+              {exportingFormat === "pdf" ? "PDF 생성 중..." : "PDF로 내보내기"}
+            </button>
+            <button className="secondary" onClick={() => handleExport("docx")} disabled={exportingFormat !== null}>
+              {exportingFormat === "docx" ? "DOCX 생성 중..." : "DOCX로 내보내기"}
+            </button>
+          </div>
+
+          <h2 style={{ marginTop: 28 }}>AI 채팅으로 수정</h2>
+          <div className="chat-log">
+            {chatLog.length === 0 && <p className="muted">예: &ldquo;보안 요구사항 섹션 추가해줘&rdquo;</p>}
+            {chatLog.map((entry, i) => (
+              <div key={i} className={`chat-bubble ${entry.role}`}>
+                {entry.text}
               </div>
-            </li>
-          ))}
-        </ul>
-      )}
+            ))}
+          </div>
+          <form onSubmit={handleChat} className="chat-form">
+            <input
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              placeholder="AI에게 수정 요청하기"
+            />
+            <button type="submit" disabled={chatting}>
+              {chatting ? "요청 중..." : "보내기"}
+            </button>
+          </form>
+        </section>
+
+        <aside className="col-side card">
+          <h2>버전 이력 ({doc.version_count})</h2>
+          <ul className="version-list">
+            {versions.map((v) => (
+              <li key={v.id} className="version-item">
+                <div>
+                  <strong>v{v.version_no}</strong>
+                </div>
+                <p className="version-note">{v.note}</p>
+                <button className="secondary" onClick={() => setContent(v.content)}>
+                  이 버전 불러오기
+                </button>
+              </li>
+            ))}
+          </ul>
+        </aside>
+      </div>
     </main>
   );
 }
