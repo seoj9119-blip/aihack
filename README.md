@@ -1,38 +1,29 @@
-# 문서 질의응답과 스터디 관리 서비스
+# Backend (FastAPI)
 
-3-tier 구조: `frontend`(화면) → `backend`(로직/API) → PostgreSQL(저장소).
-화면은 백엔드 API로만 데이터를 가져오며, DB 접근은 backend 계층에서만 이뤄집니다.
+## 로컬 PostgreSQL 기동
 
-## 전체 실행 순서
+이 머신에는 Homebrew 없이 `~/.local/pgsql`에 PostgreSQL 16을, `~/.local/pgdata`에 데이터 디렉터리를 준비해뒀습니다.
 
 ```bash
-# 0) PATH (이 머신은 Homebrew 없이 홈 디렉터리에 Node/PostgreSQL을 설치함)
-export PATH="$HOME/.local/node/bin:$PATH"
+../scripts/db-start.sh   # 기동 + studydb 없으면 생성 (최초 실행 시 initdb도 자동 수행)
+../scripts/db-stop.sh    # 정지
+```
 
-# 1) DB
-./scripts/db-start.sh
+## 실행
 
-# 2) 백엔드
+```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --port 8000 &
-cd ..
-
-# 3) 프론트엔드
-cd frontend
-npm install
-cp .env.local.example .env.local
-npm run dev
+cp .env.example .env   # 로컬 PostgreSQL 접속 정보로 수정
+uvicorn app.main:app --reload --port 8000
 ```
 
-`http://localhost:3000/studies`에서 "스터디 목록" 화면을 확인할 수 있습니다.
+`python-jose[cryptography]`, `authlib` 설치 시 Rust/OpenSSL/pkg-config가 필요합니다. Homebrew가 있다면 `brew install pkg-config openssl rust`로 준비하세요.
 
-## 종료
+## 엔드포인트
 
-```bash
-./scripts/db-stop.sh
-```
+- `GET /api/health` - 헬스체크
+- `GET /api/studies` - 스터디 목록 (프론트엔드 "스터디 목록" 화면용)
 
-세부 사항은 [backend/README.md](backend/README.md), [frontend/README.md](frontend/README.md) 참고.
+DB 읽기/쓰기는 이 계층(`app/db`, `app/models`)에서만 수행합니다.
